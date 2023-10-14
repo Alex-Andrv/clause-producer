@@ -5,7 +5,6 @@ import click
 import redis
 import tqdm
 
-
 from config import REDIS_HOST, REDIS_PORT, REDIS_DECODE_RESPONSES
 
 
@@ -22,7 +21,7 @@ def parse_clause(clause_str: str):
     return id_del, list(map(int, clause[:-1]))
 
 
-def get_learners(last_processed_learnt):
+def get_learners_with_kissat_compatible(last_processed_learnt):
     con = get_redis_connection()
     value = con.get(f'from_kissat:{last_processed_learnt}')
     add_clauses = []
@@ -36,6 +35,21 @@ def get_learners(last_processed_learnt):
             add_clauses.append(clause)
         read_learnt += 1
         value = con.get(f'from_kissat:{last_processed_learnt + read_learnt}')
+    con.close()
+    return read_learnt, add_clauses, delete_clauses
+
+def get_learnts(last_processed_learnt):
+    con = get_redis_connection()
+
+    clause = con.lrange(f'from_minisat:{last_processed_learnt}', 0, -1)
+
+    add_clauses = []
+    delete_clauses = []
+    read_learnt = 0
+    while clause is not None and len(clause) > 0:
+        add_clauses.append(clause)
+        read_learnt += 1
+        clause = con.lrange(f'from_minisat:{last_processed_learnt + read_learnt}', 0, -1)
     con.close()
     return read_learnt, add_clauses, delete_clauses
 
@@ -80,6 +94,7 @@ def combine(path_cnf, out_learnts_path, combine_path):
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
 
+
 def minimize(combine_path_cnf, backdoors_path, path_tmp_dir):
     derived_clauses = os.path.join(path_tmp_dir, "derived_original.txt")
     # вот тут бага так как pysat может быть не установлен на данный компиль
@@ -88,28 +103,29 @@ def minimize(combine_path_cnf, backdoors_path, path_tmp_dir):
     stdout, stderr = process.communicate()
     return derived_clauses
 
+
 def find_minimize_backdoors(path_cnf, out_learnts_path, path_tmp_dir,
-                                                           ea_num_runs,
-                                                           ea_seed,
-                                                           ea_instance_size,
-                                                           ea_num_iters):
+                            ea_num_runs,
+                            ea_seed,
+                            ea_instance_size,
+                            ea_num_iters):
     combine_path_cnf = os.path.join(path_tmp_dir, "combine.cnf")
     combine(path_cnf, out_learnts_path, combine_path_cnf)
     backdoors_path = find_backdoors(path_tmp_dir, combine_path_cnf, ea_num_runs,
-                                                           ea_seed,
-                                                           ea_instance_size,
-                                                           ea_num_iters)
+                                    ea_seed,
+                                    ea_instance_size,
+                                    ea_num_iters)
     minimize_backdoors_path = minimize(combine_path_cnf, backdoors_path, path_tmp_dir)
     from util.DIMACS_parser import parse_cnf
     with open(minimize_backdoors_path, 'r') as file:
-        clauses, _, _ =  parse_cnf(file)
+        clauses, _, _ = parse_cnf(file)
         return clauses
 
 
 def save_backdoors(last_produced_clause, backdoors):
     con = get_redis_connection()
     for i, backdoor in enumerate(backdoors):
-        key = f'to_kissat:{last_produced_clause + i}'
+        key = f'to_minisat:{last_produced_clause + i}'
         for v in backdoor:
             con.rpush(key, v)
     con.close()
@@ -151,7 +167,7 @@ def start_producer(path_cnf,
     last_produced_clause = 0
     learnts = []
     while True:
-        read_learnt, add_clauses, delete_clauses = get_learners(last_processed_learnt)
+        read_learnt, add_clauses, delete_clauses = get_learnts(last_processed_learnt)
         # TODO в текущей реализации мы игнорируем удаленные клозы
         last_processed_learnt += read_learnt
         learnts.extend(add_clauses)

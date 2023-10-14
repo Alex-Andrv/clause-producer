@@ -2,3 +2,4 @@ redis==5.0.1
 click==8.1.7
 python-sat==0.1.8.dev9
 pyeda==0.28.0
+tqdm==4.66.1
