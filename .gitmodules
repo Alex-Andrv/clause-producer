@@ -1,5 +1,3 @@
 [submodule "backdoor-searcher"]
 	path = backdoor-searcher
 	url = git@github.com:Lipen/backdoor-searcher.git
-
-'./backdoor-searcher/build/minisat tmp/combine.cnf -ea-num-runs=10 -ea-seed=42 -ea-instance-size=10 -ea-num-iters=1000 -backdoor-path=tmp/backdoor_path.txt 2>&1 | tee tmp/log_backdoor-searcher_original.log'
