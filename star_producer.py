@@ -1,5 +1,6 @@
 import os
 import subprocess
+from time import sleep
 
 import click
 import redis
@@ -168,6 +169,8 @@ def start_producer(path_cnf,
     learnts = []
     while True:
         read_learnt, add_clauses, delete_clauses = get_learnts(last_processed_learnt)
+        # if len(add_clauses) == 0:
+        #     sleep(1000)
         # TODO в текущей реализации мы игнорируем удаленные клозы
         last_processed_learnt += read_learnt
         learnts.extend(add_clauses)
