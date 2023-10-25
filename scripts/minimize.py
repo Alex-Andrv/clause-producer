@@ -133,6 +133,9 @@ def cli(
 
             # print()
             print(f"Minimizing characteristic function...")
+            if len(easy) == 0:
+                print(f"skipp backdoors variables)")
+                continue
             clauses = backdoor_to_clauses_via_easy(variables, easy)
 
             units = sorted((c[0] for c in clauses if len(c) == 1), key=abs)

@@ -1,3 +1,4 @@
+import glob
 import os
 import subprocess
 from time import sleep
@@ -5,9 +6,9 @@ from time import sleep
 import click
 import redis
 import tqdm
+import os
 
 from config import REDIS_HOST, REDIS_PORT, REDIS_DECODE_RESPONSES
-
 
 def get_redis_connection():
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=REDIS_DECODE_RESPONSES)
@@ -39,20 +40,31 @@ def get_learners_with_kissat_compatible(last_processed_learnt):
     con.close()
     return read_learnt, add_clauses, delete_clauses
 
-def get_learnts(last_processed_learnt):
+def parse_clauses_with_assertion(line):
+    clause_with_zero = line.split()
+    assert clause_with_zero[-1] == '0'
+    return clause_with_zero[:-1]
+
+def get_learnts(last_processed_learnt, buffer_size):
     con = get_redis_connection()
-
-    clause = con.lrange(f'from_minisat:{last_processed_learnt}', 0, -1)
-
     add_clauses = []
     delete_clauses = []
     read_learnt = 0
-    while clause is not None and len(clause) > 0:
-        add_clauses.append(clause)
-        read_learnt += 1
-        clause = con.lrange(f'from_minisat:{last_processed_learnt + read_learnt}', 0, -1)
-    con.close()
-    return read_learnt, add_clauses, delete_clauses
+
+    pipe = con.pipeline()
+    while True:
+        for i in range(buffer_size):
+            pipe.get(f'from_minisat:{last_processed_learnt + read_learnt + i}')
+        result = pipe.execute()
+        for i, clause in enumerate(result):
+            if clause:
+                add_clauses.append(parse_clauses_with_assertion(clause))
+            else:
+                con.close()
+                return read_learnt + i, add_clauses, delete_clauses
+        read_learnt += buffer_size
+
+
 
 
 def read_original_clauses(path_cnf):
@@ -69,6 +81,13 @@ def find_backdoors(path_tmp_dir,
     # Команда, которую вы хотите выполнить
     log_backdoor = os.path.join(path_tmp_dir, "log_backdoor-searcher_original.log")
     backdoor_path = os.path.join(path_tmp_dir, "backdoor_path.txt")
+
+    if os.path.exists(backdoor_path):
+        os.remove(backdoor_path)
+        print(f"{backdoor_path} has been removed.")
+    else:
+        print(f"{backdoor_path} does not exist.")
+
     command = f"./backdoor-searcher/build/minisat {combine_path_cnf} -ea-num-runs={ea_num_runs} -ea-seed={ea_seed} -ea-instance-size={ea_instance_size} -ea-num-iters={ea_num_iters} -backdoor-path={backdoor_path} 2>&1 | tee {log_backdoor}"
 
     # Выполнение команды
@@ -102,6 +121,14 @@ def minimize(combine_path_cnf, backdoors_path, path_tmp_dir):
     command = f"python scripts/minimize.py --cnf {combine_path_cnf} --backdoors {backdoors_path} -o {derived_clauses}"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
+
+    # Вывод результатов выполнения команды
+    print("Стандартный вывод:")
+    print(stdout.decode())
+
+    print("Стандартная ошибка:")
+    print(stderr.decode())
+
     return derived_clauses
 
 
@@ -112,6 +139,7 @@ def find_minimize_backdoors(path_cnf, out_learnts_path, path_tmp_dir,
                             ea_num_iters):
     combine_path_cnf = os.path.join(path_tmp_dir, "combine.cnf")
     combine(path_cnf, out_learnts_path, combine_path_cnf)
+
     backdoors_path = find_backdoors(path_tmp_dir, combine_path_cnf, ea_num_runs,
                                     ea_seed,
                                     ea_instance_size,
@@ -127,8 +155,8 @@ def save_backdoors(last_produced_clause, backdoors):
     con = get_redis_connection()
     for i, backdoor in enumerate(backdoors):
         key = f'to_minisat:{last_produced_clause + i}'
-        for v in backdoor:
-            con.rpush(key, v)
+        value = " ".join(map(str, backdoor)) + " 0"
+        con.set(key, value)
     con.close()
 
 
@@ -143,6 +171,39 @@ def save_in_drat_file(tmp_dir, learnts_file_name, learnts):
                 f.write(" ".join(map(str, clause)) + " 0\n")
     return path_output
 
+def save_learnt(out_file, learnts):
+    with open(out_file, "w") as out_file:
+        for learnt in learnts:
+            # if len(learnt) != 1:
+            for c in learnt:
+                out_file.write(c + " ")
+            out_file.write("0\n")
+
+def clean_tmp(path_tmp_dir):
+    # Используйте glob.glob() для получения списка файлов в директории
+    files = glob.glob(path_tmp_dir + '/*')
+
+    # Пройдитесь по списку файлов и удалите их
+    for file in files:
+        try:
+            os.remove(file)  # Удаление файла
+            print(f'Файл {file} успешно удален')
+        except Exception as e:
+            print(f'Ошибка при удалении файла {file}: {e}')
+
+def clean_redis():
+    con = get_redis_connection()
+    con.flushdb()
+    con.close()
+
+def check_clauses(clauses, lits, errmsg):
+    for clause in clauses:
+        id = False
+        for c in clause:
+            if int(c) in lits:
+                id = True
+                continue
+        assert id, errmsg
 
 print = click.echo
 
@@ -152,25 +213,43 @@ CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"], max_content_width=99
 @click.command(context_settings=CONTEXT_SETTINGS)
 @click.option("--cnf", "path_cnf", required=True, type=click.Path(exists=True), help="File with CNF")
 @click.option("--tmp", "path_tmp_dir", required=True, type=click.Path(exists=False), help="Path temporary directory")
-@click.option("--ea-num-runs", "ea_num_runs", default=10, show_default=True, type=int, help="Count backdoors")
+@click.option("--ea-num-runs", "ea_num_runs", default=2, show_default=True, type=int, help="Count backdoors")
 @click.option("--ea-seed", "ea_seed", default=42, show_default=True, type=int, help="seed")
 @click.option("--ea-instance-size", "ea_instance_size", default=10, show_default=True, type=int,
               help="Size of backdoor")
-@click.option("--ea-num-iters", "ea_num_iters", default=1000, show_default=True, type=int,
+@click.option("--ea-num-iters", "ea_num_iters", default=2000, show_default=True, type=int,
               help="Count iteration for one backdoor")
+@click.option("--validation", "validation", default=False, show_default=False, type=bool,
+              help="Add validation before adding to redis. Only works for problems with solution 1 sat")
+@click.option("--validation-sat-path", "validation_sat_path", default="validation_sat_cnf.txt", type=click.Path(exists=True), help="File with one sat solution")
+@click.option("--buffer-size", "buffer_size", default=1000, show_default=True, type=int, help="redis buffer size")
 def start_producer(path_cnf,
                    path_tmp_dir,
                    ea_num_runs,
                    ea_seed,
                    ea_instance_size,
-                   ea_num_iters):
+                   ea_num_iters,
+                   validation,
+                   validation_sat_path,
+                   buffer_size):
     last_processed_learnt = 0
     last_produced_clause = 0
     learnts = []
+    if validation:
+        with open(validation_sat_path, 'r') as file:
+            lits = set(map(int, file.readline().split()))
+    clean_tmp(path_tmp_dir)
+    # clean_redis()
     while True:
-        read_learnt, add_clauses, delete_clauses = get_learnts(last_processed_learnt)
-        # if len(add_clauses) == 0:
-        #     sleep(1000)
+        read_learnt, add_clauses, delete_clauses = get_learnts(last_processed_learnt, buffer_size)
+
+        if validation:
+            check_clauses(add_clauses, lits, "invalid claus from minisat")
+
+        # save_learnt("validation_sat_cnf.txt", add_clauses)
+        if len(add_clauses) == 0:
+            sleep(10)
+            continue
         # TODO в текущей реализации мы игнорируем удаленные клозы
         last_processed_learnt += read_learnt
         learnts.extend(add_clauses)
@@ -182,8 +261,18 @@ def start_producer(path_cnf,
                                                            ea_instance_size,
                                                            ea_num_iters)
         save_backdoors(last_produced_clause, minimize_backdoors)
+        print("save")
         last_produced_clause += len(minimize_backdoors)
+        learnts.extend(minimize_backdoors)
+
+        if validation:
+            check_clauses(minimize_backdoors, lits, "invalid claus to minisat")
 
 
 if __name__ == "__main__":
+
+    # process = subprocess.Popen("which -a python", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # stdout, stderr = process.communicate()
+    # print("------------------------------")
+    # print(stdout)
     start_producer()
