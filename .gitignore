@@ -1,4 +1,4 @@
 *.idea/*
 
 /backdoor-producer/tmp/*
-/tmp/
+*/tmp*

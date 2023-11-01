@@ -2,19 +2,21 @@ import glob
 import itertools
 import os
 import subprocess
+import sys
 from time import sleep
 
 import click
 import redis
-import tqdm
 import os
 import shutil
 
 from config import REDIS_HOST, REDIS_PORT, REDIS_DECODE_RESPONSES
 
+HOST = REDIS_HOST
+PORT = REDIS_PORT
 
 def get_redis_connection():
-    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=REDIS_DECODE_RESPONSES)
+    return redis.Redis(host=HOST, port=PORT, decode_responses=REDIS_DECODE_RESPONSES)
 
 
 def parse_clause(clause_str: str):
@@ -114,24 +116,28 @@ def find_backdoors(path_tmp_dir,
     return backdoor_path
 
 
-def combine(path_cnf, out_learnts_path, combine_path):
-    command = f"cat {path_cnf} {out_learnts_path} > {combine_path}"
-    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = process.communicate()
-
-    if process.returncode == 0:
-        print("The combination process was successful")
+def combine(path_cnf, add_clauses, combine_path):
+    if not os.path.exists(combine_path):
+        # Файл не существует, создаем его и записываем в него
+        print(f"Writing {len(add_clauses)} extracted clauses to new file'{combine_path}'...")
+        with open(combine_path, "w") as file:
+            with open(path_cnf, 'r') as origin_cnf:
+                file.write(origin_cnf.read())
+                file.write("\n")
+            for clause in add_clauses:
+                file.write(" ".join(map(str, clause)) + " 0\n")
     else:
-        raise Exception(f"There are exception during combination files path_cnf={path_cnf}, "
-                        f"out_learnts_path={out_learnts_path}: \n"
-                        f"ERROR: {stderr.decode('utf-8')}"
-                        f"STDOUT: {stdout.decode('utf-8')}")
+        # Файл существует, дописываем в конец
+        print(f"Writing {len(add_clauses)} extracted clauses to end file '{combine_path}'...")
+        with open(combine_path, "a") as file:
+            for clause in add_clauses:
+                file.write(" ".join(map(str, clause)) + " 0\n")
 
 
 def minimize(combine_path_cnf, backdoors_path, path_tmp_dir, log_dir):
     derived_clauses = os.path.join(path_tmp_dir, "derived_original.txt")
     # вот тут бага так как pysat может быть не установлен на данный компиль
-    command = f"python scripts/minimize.py --cnf {combine_path_cnf} --backdoors {backdoors_path} -o {derived_clauses}"
+    command = f"python scripts/minimize.py --cnf {combine_path_cnf} --backdoors {backdoors_path} -o {derived_clauses} --no-duplicates"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
 
@@ -168,14 +174,13 @@ def copy_to(file, to_dir):
         raise e
 
 
-def find_minimize_backdoors(path_cnf, out_learnts_path, path_tmp_dir,
+def find_minimize_backdoors(combine_path_cnf, path_tmp_dir,
                             ea_num_runs,
                             ea_seed,
                             ea_instance_size,
                             ea_num_iters,
                             log_dir):
-    combine_path_cnf = os.path.join(path_tmp_dir, "combine.cnf")
-    combine(path_cnf, out_learnts_path, combine_path_cnf)
+
 
     backdoors_path = find_backdoors(path_tmp_dir, combine_path_cnf, ea_num_runs,
                                     ea_seed,
@@ -187,7 +192,6 @@ def find_minimize_backdoors(path_cnf, out_learnts_path, path_tmp_dir,
     minimize_backdoors_path = minimize(combine_path_cnf, backdoors_path, path_tmp_dir, log_dir)
 
     copy_to(minimize_backdoors_path, log_dir)
-
 
     from util.DIMACS_parser import parse_cnf
     with open(minimize_backdoors_path, 'r') as minimize_file:
@@ -203,6 +207,13 @@ def save_backdoors(last_produced_clause, backdoors):
         con.set(key, value)
     con.close()
 
+def push_to_queue_clause(backdoors):
+    con = get_redis_connection()
+    for i, backdoor in enumerate(backdoors):
+        key = f'to_minisat'
+        value = " ".join(map(str, backdoor)) + " 0"
+        con.lpush(key, value)
+    con.close()
 
 def save_in_drat_file(tmp_dir, learnts_file_name, learnts):
     if not os.path.exists(tmp_dir):
@@ -212,13 +223,13 @@ def save_in_drat_file(tmp_dir, learnts_file_name, learnts):
         # Файл не существует, создаем его и записываем в него
         print(f"Writing {len(learnts)} extracted clauses to new file'{path_output}'...")
         with open(path_output, "w") as file:
-            for clause in tqdm.tqdm(learnts):
+            for clause in learnts:
                 file.write(" ".join(map(str, clause)) + " 0\n")
     else:
         # Файл существует, дописываем в конец
         print(f"Writing {len(learnts)} extracted clauses to end file '{path_output}'...")
         with open(path_output, "a") as file:
-            for clause in tqdm.tqdm(learnts):
+            for clause in learnts:
                 file.write(" ".join(map(str, clause)) + " 0\n")
     return path_output
 
@@ -275,48 +286,42 @@ def _get_learnt_set(learnts, filter_function):
 
 
 def _get_statistics(derived, learnts):
-    units = _get_learnt_set(learnts, lambda learnt: len(learnt) == 1)
-    binary = _get_learnt_set(learnts, lambda learnt: len(learnt) == 2)
-    ternary = _get_learnt_set(learnts, lambda learnt: len(learnt) == 3)
-    large = _get_learnt_set(learnts, lambda learnt: len(learnt) > 3)
-    derived_units = _get_learnt_set(derived, lambda learnt: len(learnt) == 1)
-    derived_binary = _get_learnt_set(derived, lambda learnt: len(learnt) == 2)
-    derived_ternary = _get_learnt_set(derived, lambda learnt: len(learnt) == 3)
-    derived_large = _get_learnt_set(derived, lambda learnt: len(learnt) > 3)
+    origin = _split_clause(learnts)
+    derived = _split_clause(derived)
 
     return {
-        "new_units": derived_units - units,
-        "new_binary": derived_binary - binary,
-        "new_ternary": derived_ternary - ternary,
-        "new_large": derived_large - large,
+        "new_units": derived["new_units"] - origin["new_units"],
+        "new_binary": derived["new_binary"] - origin["new_binary"],
+        "new_ternary": derived["new_ternary"] - origin["new_ternary"],
+        "new_large": derived["new_large"] - origin["new_large"],
     }
 
 
-def save_statistics(minimize_clauses, learnts, add_clauses, log_dir):
+def _split_clause(clauses):
+    units = _get_learnt_set(clauses, lambda learnt: len(learnt) == 1)
+    binary = _get_learnt_set(clauses, lambda learnt: len(learnt) == 2)
+    ternary = _get_learnt_set(clauses, lambda learnt: len(learnt) == 3)
+    large = _get_learnt_set(clauses, lambda learnt: len(learnt) > 3)
+    return {
+        "new_units": units,
+        "new_binary": binary,
+        "new_ternary": ternary,
+        "new_large": large,
+    }
+
+
+def save_statistics(minimize_clauses, add_clauses, log_dir):
     with open(log_dir + "/statistics", "w") as statistics_file:
         statistics_file.write(f"All minimized clause: {len(minimize_clauses)} \n")
 
-        units = _get_learnt_set(minimize_clauses, lambda learnt: len(learnt) == 1)
-        binary = _get_learnt_set(minimize_clauses, lambda learnt: len(learnt) == 2)
-        ternary = _get_learnt_set(minimize_clauses, lambda learnt: len(learnt) == 3)
-        large = _get_learnt_set(minimize_clauses, lambda learnt: len(learnt) > 3)
-        split = {
-            "new_units": units,
-            "new_binary": binary,
-            "new_ternary": ternary,
-            "new_large": large,
-        }
+        split = _split_clause(minimize_clauses)
+
         for key, learnts_v in split.items():
             statistics_file.write(f"deriving {key} where {len(learnts_v)}: {learnts_v} \n")
 
-        derived = _get_statistics(minimize_clauses, learnts)
+        derived = _get_statistics(minimize_clauses, add_clauses)
         for key, learnts_v in derived.items():
-            statistics_file.write(f"deriving unique {key} where {len(learnts_v)}: {learnts_v} \n")
-
-        real_derived = _get_statistics(minimize_clauses, learnts + add_clauses)
-        for key, learnts_v in real_derived.items():
             statistics_file.write(f"real deriving unique {key} where {len(learnts_v)}: {learnts_v} \n")
-
 
 
 @click.command(context_settings=CONTEXT_SETTINGS)
@@ -328,28 +333,32 @@ def save_statistics(minimize_clauses, learnts, add_clauses, log_dir):
               help="Size of backdoor")
 @click.option("--ea-num-iters", "ea_num_iters", default=2000, show_default=True, type=int,
               help="Count iteration for one backdoor")
-@click.option("--validation", "validation", default=False, show_default=False, type=bool,
-              help="Add validation before adding to redis. Only works for problems with solution 1 sat")
-@click.option("--validation-sat-path", "validation_sat_path", default="validation_sat_cnf.txt",
-              type=click.Path(exists=True), help="File with one sat solution")
 @click.option("--buffer-size", "buffer_size", default=1000, show_default=True, type=int, help="redis buffer size")
 @click.option("--root-log-dir", "root_log_dir", required=True, type=click.Path(exists=False),
               help="Path to the root log dir")
+@click.option('--redis-host', default='localhost', help='Redis server host')
+@click.option('--redis-port', default=6379, help='Redis server port')
 def start_producer(path_cnf,
                    path_tmp_dir,
                    ea_num_runs,
                    ea_seed,
                    ea_instance_size,
                    ea_num_iters,
-                   validation,
-                   validation_sat_path,
                    buffer_size,
-                   root_log_dir):
+                   root_log_dir,
+                   redis_host,
+                   redis_port):
+
+    global HOST, PORT
+    HOST = redis_host
+    PORT = redis_port
+
     last_processed_learnt = 0
-    last_produced_clause = 0
-    learnts = []
+    os.makedirs(root_log_dir, exist_ok=True)
+    os.makedirs(path_tmp_dir, exist_ok=True)
     clean_dir(path_tmp_dir)
     clean_dir(root_log_dir)
+    combine_path_cnf = os.path.join(path_tmp_dir, "combine.cnf")
     # clean_redis()
     read_learnt, add_clauses, delete_clauses = get_learnts(last_processed_learnt, buffer_size)
     for i in itertools.count():
@@ -357,33 +366,38 @@ def start_producer(path_cnf,
         log_dir = root_log_dir + f"/{i}"
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
-        if len(add_clauses) == 0:
-            print(f"Iteration {i}: no new learnts, sleep 10 seconds")
-            sleep(10)
-            continue
+
         # TODO в текущей реализации мы игнорируем удаленные клозы
-        out_learnts_path = save_in_drat_file(path_tmp_dir, "drat.txt", add_clauses)
-        learnts.extend(add_clauses)
 
-        minimize_clauses = find_minimize_backdoors(path_cnf, out_learnts_path, path_tmp_dir,
-                                                                     ea_num_runs,
-                                                                     ea_seed,
-                                                                     ea_instance_size,
-                                                                     ea_num_iters,
-                                                                     log_dir)
+        combine(path_cnf, add_clauses, combine_path_cnf)
 
-        save_backdoors(last_produced_clause, minimize_clauses)
+        minimize_clauses = find_minimize_backdoors(combine_path_cnf, path_tmp_dir,
+                                                   ea_num_runs,
+                                                   ea_seed,
+                                                   ea_instance_size,
+                                                   ea_num_iters,
+                                                   log_dir)
+
+        push_to_queue_clause(minimize_clauses)
+
         print(f"Iteration {i}: save backdoors")
-        last_produced_clause += len(minimize_clauses)
 
-        save_in_drat_file(path_tmp_dir, "drat.txt", minimize_clauses)
+        combine(path_cnf, minimize_clauses, combine_path_cnf)
 
         last_processed_learnt += read_learnt
-        read_learnt, add_clauses, delete_clauses = get_learnts(last_processed_learnt, buffer_size)
-        # TODO make learnts set of tuple
-        save_statistics(minimize_clauses, learnts, add_clauses, log_dir)
 
-        learnts.extend(minimize_clauses)
+
+        for i in itertools.count():
+            print(f"Iteration {i}: no new learnts, sleep 10 seconds")
+            sleep(10)
+            read_learnt, add_clauses, delete_clauses = get_learnts(last_processed_learnt, buffer_size)
+            if len(add_clauses) != 0:
+                break
+            if i > 30:
+                raise Exception("Didn't get new lernts 30 times")
+
+        # TODO make learnts set of tuple
+        save_statistics(minimize_clauses, add_clauses, log_dir)
 
 
 if __name__ == "__main__":
