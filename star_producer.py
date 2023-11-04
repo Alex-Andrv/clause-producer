@@ -85,7 +85,8 @@ def find_backdoors(path_tmp_dir,
                    combine_path_cnf,
                    ea_num_runs,
                    ea_instance_size,
-                   ea_num_iters):
+                   ea_num_iters,
+                   log_dir):
     # Команда, которую вы хотите выполнить
     log_backdoor = os.path.join(path_tmp_dir, "log_backdoor-searcher_original.log")
     backdoor_path = os.path.join(path_tmp_dir, "backdoor_path.txt")
@@ -106,6 +107,8 @@ def find_backdoors(path_tmp_dir,
     stdout, stderr = process.communicate()
 
     if process.returncode == 0:
+        with open(log_dir + "/find_backdoors_strout", 'w') as find_backdoors_stdout_file:
+            find_backdoors_stdout_file.write(stdout.decode('utf-8'))
         print("Find backdoors process was successful")
     else:
         raise Exception(f"There are exception during find backdoors files "
@@ -185,7 +188,7 @@ def find_minimize_backdoors(combine_path_cnf, path_tmp_dir,
                             log_dir):
     backdoors_path = find_backdoors(path_tmp_dir, combine_path_cnf, ea_num_runs,
                                     ea_instance_size,
-                                    ea_num_iters)
+                                    ea_num_iters, log_dir)
 
     copy_to(backdoors_path, log_dir)
 
