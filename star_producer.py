@@ -1,8 +1,11 @@
 import glob
 import itertools
 import os
+import random
 import subprocess
 import sys
+import time
+from datetime import datetime
 from time import sleep
 
 import click
@@ -14,6 +17,7 @@ from config import REDIS_HOST, REDIS_PORT, REDIS_DECODE_RESPONSES
 
 HOST = REDIS_HOST
 PORT = REDIS_PORT
+
 
 def get_redis_connection():
     return redis.Redis(host=HOST, port=PORT, decode_responses=REDIS_DECODE_RESPONSES)
@@ -65,7 +69,7 @@ def get_learnts(last_processed_learnt, buffer_size):
         result = pipe.execute()
         for i, clause in enumerate(result):
             if clause:
-                add_clauses.append(parse_clauses_with_assertion(clause))
+                add_clauses.append(list(map(int, parse_clauses_with_assertion(clause))))
             else:
                 con.close()
                 return read_learnt + i, add_clauses, delete_clauses
@@ -80,7 +84,6 @@ def read_original_clauses(path_cnf):
 def find_backdoors(path_tmp_dir,
                    combine_path_cnf,
                    ea_num_runs,
-                   ea_seed,
                    ea_instance_size,
                    ea_num_iters):
     # Команда, которую вы хотите выполнить
@@ -93,6 +96,7 @@ def find_backdoors(path_tmp_dir,
     else:
         print(f"{backdoor_path} does not exist.")
 
+    ea_seed = random.randint(1, 10000)
     command = f"./backdoor-searcher/build/minisat {combine_path_cnf} -ea-num-runs={ea_num_runs} -ea-seed={ea_seed} -ea-instance-size={ea_instance_size} -ea-num-iters={ea_num_iters} -backdoor-path={backdoor_path} 2>&1 | tee {log_backdoor}"
 
     # Выполнение команды
@@ -176,14 +180,10 @@ def copy_to(file, to_dir):
 
 def find_minimize_backdoors(combine_path_cnf, path_tmp_dir,
                             ea_num_runs,
-                            ea_seed,
                             ea_instance_size,
                             ea_num_iters,
                             log_dir):
-
-
     backdoors_path = find_backdoors(path_tmp_dir, combine_path_cnf, ea_num_runs,
-                                    ea_seed,
                                     ea_instance_size,
                                     ea_num_iters)
 
@@ -207,6 +207,7 @@ def save_backdoors(last_produced_clause, backdoors):
         con.set(key, value)
     con.close()
 
+
 def push_to_queue_clause(backdoors):
     con = get_redis_connection()
     for i, backdoor in enumerate(backdoors):
@@ -214,6 +215,7 @@ def push_to_queue_clause(backdoors):
         value = " ".join(map(str, backdoor)) + " 0"
         con.lpush(key, value)
     con.close()
+
 
 def save_in_drat_file(tmp_dir, learnts_file_name, learnts):
     if not os.path.exists(tmp_dir):
@@ -310,25 +312,47 @@ def _split_clause(clauses):
     }
 
 
-def save_statistics(minimize_clauses, add_clauses, log_dir):
+def save_statistics(minimize_clauses, add_clauses, sift_clause, log_dir, delta):
     with open(log_dir + "/statistics", "w") as statistics_file:
         statistics_file.write(f"All minimized clause: {len(minimize_clauses)} \n")
 
-        split = _split_clause(minimize_clauses)
+        minimize_clauses_split = _split_clause(minimize_clauses)
 
-        for key, learnts_v in split.items():
+        for key, learnts_v in minimize_clauses_split.items():
             statistics_file.write(f"deriving {key} where {len(learnts_v)}: {learnts_v} \n")
 
         derived = _get_statistics(minimize_clauses, add_clauses)
         for key, learnts_v in derived.items():
             statistics_file.write(f"real deriving unique {key} where {len(learnts_v)}: {learnts_v} \n")
 
+        # TODO remove later
+        sift_clause_split = _split_clause(sift_clause)
+        for key in derived:
+            assert derived[key] == sift_clause_split[key], f"sets mast be equals {derived[key]} :: {sift_clause_split[key]}"
+
+        statistics_file.write(f"current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} \n")
+        statistics_file.write(f"calculation time, seconds: {delta} \n")
+
+
+def sift(minimize_clauses, add_clauses):
+    minimize_clauses_tuple = set(map(tuple, map(sorted, minimize_clauses)))
+    add_clauses_tuple = set(map(tuple, map(sorted, add_clauses)))
+    return minimize_clauses_tuple - add_clauses_tuple
+
+
+def check(clauses, validation_set, prefix):
+    for clause in clauses:
+        is_sat = False
+        for lit in clause:
+            is_sat |= (int(lit) in validation_set)
+        assert is_sat, prefix
+
 
 @click.command(context_settings=CONTEXT_SETTINGS)
 @click.option("--cnf", "path_cnf", required=True, type=click.Path(exists=True), help="File with CNF")
 @click.option("--tmp", "path_tmp_dir", required=True, type=click.Path(exists=False), help="Path temporary directory")
 @click.option("--ea-num-runs", "ea_num_runs", default=2, show_default=True, type=int, help="Count backdoors")
-@click.option("--ea-seed", "ea_seed", default=42, show_default=True, type=int, help="seed")
+@click.option("--random-seed", "seed", default=42, show_default=True, type=int, help="seed")
 @click.option("--ea-instance-size", "ea_instance_size", default=10, show_default=True, type=int,
               help="Size of backdoor")
 @click.option("--ea-num-iters", "ea_num_iters", default=2000, show_default=True, type=int,
@@ -338,20 +362,31 @@ def save_statistics(minimize_clauses, add_clauses, log_dir):
               help="Path to the root log dir")
 @click.option('--redis-host', default='localhost', help='Redis server host')
 @click.option('--redis-port', default=6379, help='Redis server port')
+@click.option(
+    "--no-validation/--validation", "no_validation", default=True, help="no validation"
+)
 def start_producer(path_cnf,
                    path_tmp_dir,
                    ea_num_runs,
-                   ea_seed,
+                   seed,
                    ea_instance_size,
                    ea_num_iters,
                    buffer_size,
                    root_log_dir,
                    redis_host,
-                   redis_port):
+                   redis_port,
+                   no_validation):
+    random.seed(seed)
 
     global HOST, PORT
     HOST = redis_host
     PORT = redis_port
+
+    if not no_validation:
+        with open("validation.cnf", 'r') as validation:
+            validation_set = set(map(int, validation.readline().split()))
+    else:
+        validation_set = None
 
     last_processed_learnt = 0
     os.makedirs(root_log_dir, exist_ok=True)
@@ -359,10 +394,12 @@ def start_producer(path_cnf,
     clean_dir(path_tmp_dir)
     clean_dir(root_log_dir)
     combine_path_cnf = os.path.join(path_tmp_dir, "combine.cnf")
-    # clean_redis()
     read_learnt, add_clauses, delete_clauses = get_learnts(last_processed_learnt, buffer_size)
     for i in itertools.count():
         print(f'Iteration {i}: new learnts: {read_learnt}')
+        if not no_validation:
+            check(add_clauses, validation_set, "from_minisat")
+            print("validation")
         log_dir = root_log_dir + f"/{i}"
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
@@ -370,15 +407,17 @@ def start_producer(path_cnf,
         # TODO в текущей реализации мы игнорируем удаленные клозы
 
         combine(path_cnf, add_clauses, combine_path_cnf)
-
+        start_time = time.time()
         minimize_clauses = find_minimize_backdoors(combine_path_cnf, path_tmp_dir,
                                                    ea_num_runs,
-                                                   ea_seed,
                                                    ea_instance_size,
                                                    ea_num_iters,
                                                    log_dir)
+        end_time = time.time()
 
-        push_to_queue_clause(minimize_clauses)
+        if not no_validation:
+            check(minimize_clauses, validation_set, "to_minisat")
+            print("validation")
 
         print(f"Iteration {i}: save backdoors")
 
@@ -386,18 +425,21 @@ def start_producer(path_cnf,
 
         last_processed_learnt += read_learnt
 
-
-        for i in itertools.count():
-            print(f"Iteration {i}: no new learnts, sleep 10 seconds")
-            sleep(10)
+        for j in itertools.count():
             read_learnt, add_clauses, delete_clauses = get_learnts(last_processed_learnt, buffer_size)
             if len(add_clauses) != 0:
                 break
-            if i > 30:
+            print(f"Iteration {j}: no new learnts, sleep 10 seconds")
+            sleep(10)
+            if j > 30:
                 raise Exception("Didn't get new lernts 30 times")
 
+        sift_clause = sift(minimize_clauses, add_clauses)
+
+        push_to_queue_clause(sift_clause)
+
         # TODO make learnts set of tuple
-        save_statistics(minimize_clauses, add_clauses, log_dir)
+        save_statistics(minimize_clauses, add_clauses, sift_clause, log_dir, end_time - start_time)
 
 
 if __name__ == "__main__":
