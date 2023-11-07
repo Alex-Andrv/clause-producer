@@ -11,11 +11,10 @@ import redis
 import os
 import shutil
 
-from config import REDIS_HOST, REDIS_PORT, REDIS_DECODE_RESPONSES
 
-HOST = REDIS_HOST
-PORT = REDIS_PORT
-
+HOST = None
+PORT = None
+REDIS_DECODE_RESPONSES = True
 
 def get_redis_connection():
     return redis.Redis(host=HOST, port=PORT, decode_responses=REDIS_DECODE_RESPONSES)
@@ -408,8 +407,6 @@ def start_producer(path_cnf,
         log_dir = root_log_dir + f"/{i}"
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
-
-        # TODO в текущей реализации мы игнорируем удаленные клозы
 
         combine(path_cnf, add_clauses, combine_path_cnf)
         start_time = time.time()
