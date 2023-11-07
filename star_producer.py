@@ -139,10 +139,10 @@ def combine(path_cnf, add_clauses, combine_path):
                 file.write(" ".join(map(str, clause)) + " 0\n")
 
 
-def minimize(combine_path_cnf, backdoors_path, path_tmp_dir, log_dir):
+def minimize(combine_path_cnf, mini_conf, backdoors_path, path_tmp_dir, log_dir):
     derived_clauses = os.path.join(path_tmp_dir, "derived_original.txt")
     # вот тут бага так как pysat может быть не установлен на данный компиль
-    command = f"python scripts/minimize.py --cnf {combine_path_cnf} --backdoors {backdoors_path} -o {derived_clauses} --no-duplicates"
+    command = f"python scripts/minimize.py --cnf {combine_path_cnf} --backdoors {backdoors_path} --num-confl {mini_conf} -o {derived_clauses} --no-duplicates"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
 
@@ -183,6 +183,7 @@ def find_minimize_backdoors(combine_path_cnf, path_tmp_dir,
                             ea_num_runs,
                             ea_instance_size,
                             ea_num_iters,
+                            mini_conf,
                             log_dir):
     backdoors_path = find_backdoors(path_tmp_dir, combine_path_cnf, ea_num_runs,
                                     ea_instance_size,
@@ -190,7 +191,7 @@ def find_minimize_backdoors(combine_path_cnf, path_tmp_dir,
 
     copy_to(backdoors_path, log_dir)
 
-    minimize_backdoors_path = minimize(combine_path_cnf, backdoors_path, path_tmp_dir, log_dir)
+    minimize_backdoors_path = minimize(combine_path_cnf, mini_conf, backdoors_path, path_tmp_dir, log_dir)
 
     copy_to(minimize_backdoors_path, log_dir)
 
@@ -358,6 +359,8 @@ def check(clauses, validation_set, prefix):
               help="Size of backdoor")
 @click.option("--ea-num-iters", "ea_num_iters", default=2000, show_default=True, type=int,
               help="Count iteration for one backdoor")
+@click.option("--mini-conf", "mini_conf", default=0, show_default=True, type=int,
+              help="count conflict during minimization. If not zero, than deep minimization")
 @click.option("--buffer-size", "buffer_size", default=1000, show_default=True, type=int, help="redis buffer size")
 @click.option("--root-log-dir", "root_log_dir", required=True, type=click.Path(exists=False),
               help="Path to the root log dir")
@@ -372,6 +375,7 @@ def start_producer(path_cnf,
                    seed,
                    ea_instance_size,
                    ea_num_iters,
+                   mini_conf,
                    buffer_size,
                    root_log_dir,
                    redis_host,
@@ -413,6 +417,7 @@ def start_producer(path_cnf,
                                                    ea_num_runs,
                                                    ea_instance_size,
                                                    ea_num_iters,
+                                                   mini_conf,
                                                    log_dir)
         end_time = time.time()
 
