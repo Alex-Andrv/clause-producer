@@ -95,7 +95,7 @@ def find_backdoors(path_tmp_dir,
         print(f"{backdoor_path} does not exist.")
 
     ea_seed = random.randint(1, 10000)
-    command = f"./backdoor-searcher/build/minisat {combine_path_cnf} -ea-num-runs={ea_num_runs} -ea-seed={ea_seed} -ea-instance-size={ea_instance_size} -ea-num-iters={ea_num_iters} -backdoor-path={backdoor_path} 2>&1 | tee {log_backdoor}"
+    command = f"./backdoor-searcher/build/minisat {combine_path_cnf} -ea-num-runs={ea_num_runs} -ea-seed={ea_seed} -ea-instance-size={ea_instance_size} -ea-num-iters={ea_num_iters} -ea-output-path={backdoor_path} 2>&1 | tee {log_backdoor}"
 
     # Выполнение команды
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
