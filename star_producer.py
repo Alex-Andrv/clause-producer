@@ -102,6 +102,9 @@ def find_backdoors(path_tmp_dir,
 
     # Дождитесь выполнения команды и получите выходные данные и ошибки
     stdout, stderr = process.communicate()
+    print(command)
+    print(stdout)
+    print(stderr)
 
     if process.returncode == 0:
         with open(log_dir + "/find_backdoors_strout", 'w') as find_backdoors_stdout_file:
